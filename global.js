@@ -431,7 +431,10 @@
       const originalRadio = Array.from(document.querySelectorAll('input[type="radio"]'))
         .find(r => String(r.value || "").includes("OPM01"));
       const bankFieldset = originalRadio && originalRadio.closest("fieldset");
-      if (bankFieldset) bankFieldset.style.setProperty("display", "none", "important");
+      if (bankFieldset) {
+        if (card) bankFieldset.style.setProperty("display", "none", "important");
+        else bankFieldset.style.removeProperty("display");
+      }
       const candidates = Array.from(document.querySelectorAll(
         '.css-1hw29i9, input[placeholder*="입금자명"], input[name="depositor"], #fnt-depositor-area'
       ));
@@ -503,11 +506,9 @@
         const depositorInput = document.querySelector('input[placeholder*="입금자명"],input[name="depositor"]');
         const depositorBlock = document.querySelector('.css-1hw29i9') ||
           (depositorInput && depositorInput.parentElement);
-        if (depositorBlock && !customUI.contains(depositorBlock)) {
-          depositorBlock.classList.add('moved-depositor-block');
-          customUI.querySelector('#fnt-depositor-area').appendChild(depositorBlock);
-        }
-        if (bankFieldset) bankFieldset.style.setProperty('display','none','important');
+        // React가 관리하는 입금 필드를 다른 부모로 이동하면 Safari에서
+        // 재렌더링/표시 오류가 날 수 있으므로 원래 위치에 둔다.
+        // syncBankVisibility가 선택된 수단에 맞게 원본 필드를 제어한다.
         function setActive(method) {
           selectedMethod = method;
           window.__fntPayMethod = method;
@@ -516,6 +517,14 @@
           customUI.querySelectorAll('button[data-method]').forEach(btn =>
             btn.classList.toggle('active', btn.dataset.method === method));
           syncBankVisibility();
+          // BANK 선택 시 아임웹의 실제 무통장 결제수단도 선택되어야
+          // 은행/입금자명 필드가 렌더링된다.
+          if (method === 'BANK') {
+            const nativeBank = Array.from(document.querySelectorAll('input[type="radio"]'))
+              .find(r => String(r.value || '').includes('OPM01'));
+            if (nativeBank && !nativeBank.checked) nativeBank.click();
+            syncBankVisibility();
+          }
           saveCurrentState('Method Switch', method);
         }
         customUI.querySelectorAll('button[data-method]').forEach(btn =>
