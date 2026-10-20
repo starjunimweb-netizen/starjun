@@ -16,10 +16,8 @@
   // --- Domain Restriction ---
   const ALLOWED_HOSTNAMES = [
 
-    "ohrishop-officialiy.imweb.me",
-    "ohrishop3.com",
-    "ohrishop2.com",
-    "ohrishop4.com",
+    "vosxpdlzm.imweb.me",
+    "starjun.me",
     
     "localhost",
     "127.0.0.1",
