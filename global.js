@@ -21,7 +21,7 @@
     
     "localhost",
     "127.0.0.1",
-    "orshoprep.netlify.app",
+    "dulcet-elf-ede159.netlify.app",
   ];
 
   if (
@@ -46,7 +46,7 @@
   );
 
   // --- Hosted Domain Detect ---
-  let hostedDomain = "https://orshoprep.netlify.app";
+  let hostedDomain = "https://dulcet-elf-ede159.netlify.app";
   try {
     if (document.currentScript && document.currentScript.src) {
       const scriptUrl = new URL(document.currentScript.src);
