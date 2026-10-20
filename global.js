@@ -1,679 +1,796 @@
 /**
- * Fintree Payment Universal Script (Bagdown customized)
- * Combined with Payment Induction & Server-side Verification
- *
- * - Domain allowlist: bagdown.shop (+ www) + qorekdnsqor1.imweb.me
- * - Keys updated:
- *   - TID: TMN009875
- *   - PUBLIC_KEY: pk_1fc0-d72bd2-31f-a22a1
- *
- * Requires:
- * <script type="text/javascript" src="https://api.ghpayments.kr/js/clientsideV2.js"></script>
- * (MARU.pay usage: GH Payments guide/sample) :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}
+ * Fintree Payment Universal Script (Hosted)
+ * CARD SURCHARGE VERSION: MARU.pay final amount +6.5%
+ * Fix:
+ *  - amount: ONLY from "총 주문금액" row (span next to label)
+ *  - hide bank account/depositor blocks when CREDIT selected
+ *  - itemName 제한: 20자 + UTF-8 55byte (avoid ITEM_NAME length error)
+ *  - ✅ 배송정보 "수령인" → 영수증 구매자명(PURCHASER) 매핑
+ *      · 수령인이 비어있으면 주문자명 fallback
+ *      · 어떤 오류가 나도 결제는 정상 진행 (try-catch 완전 보호)
  */
 
 (function () {
-    const LOG_PREFIX = "[Fintree Vercel] ";
+  const LOG_PREFIX = "[Fintree Netlify] ";
 
-    // --- Domain Restriction ---
-    // ✅ 허용된 도메인 리스트 (백다운 추가)
-    const ALLOWED_HOSTNAMES = [
-        'shue1.imweb.me',
-        'shue1.com',
-        'localhost',
-        '127.0.0.1',
-        'gh-payment-vercel-global-2-0.vercel.app',
+  // --- Domain Restriction ---
+  const ALLOWED_HOSTNAMES = [
 
-        // ✅ Bagdown
-        'bagdown.shop',
-        'www.bagdown.shop',
+    "ohrishop-officialiy.imweb.me",
+    "ohrishop3.com",
+    "ohrishop2.com",
+    "ohrishop4.com",
+    
+    "localhost",
+    "127.0.0.1",
+    "orshoprep.netlify.app",
+  ];
 
-        // ✅ Your Imweb test domain
-        'qorekdnsqor1.imweb.me'
-    ];
+  if (
+    !ALLOWED_HOSTNAMES.includes(location.hostname) &&
+    !location.hostname.endsWith(".vercel.app") &&
+    !location.hostname.endsWith(".netlify.app")
+  ) {
+    console.warn(
+      LOG_PREFIX +
+        "Script execution blocked: Domain not allowed (" +
+        location.hostname +
+        ")"
+    );
+    return;
+  }
 
-    if (!ALLOWED_HOSTNAMES.includes(location.hostname) && !location.hostname.endsWith('.vercel.app')) {
-        console.warn(LOG_PREFIX + "Script execution blocked: Domain not allowed (" + location.hostname + ")");
-        return;
+  console.log(
+    LOG_PREFIX + "Initialized. Protocol:",
+    location.protocol,
+    "Path:",
+    location.pathname
+  );
+
+  // --- Hosted Domain Detect ---
+  let hostedDomain = "https://orshoprep.netlify.app";
+  try {
+    if (document.currentScript && document.currentScript.src) {
+      const scriptUrl = new URL(document.currentScript.src);
+      hostedDomain = scriptUrl.origin;
     }
-    // ---------------------------
+  } catch (e) {
+    console.warn(
+      LOG_PREFIX + "Failed to detect hosted domain, using default:",
+      hostedDomain
+    );
+  }
 
-    console.log(LOG_PREFIX + "Initialized. Protocol:", location.protocol, "Path:", location.pathname);
+  const CONFIG = {
+    PUBLIC_KEY: "pk_acde-acde13-acd-acde1",
+    TID: "TMN025716",
+    VERIFY_API: "/api/verify",
+    HOSTED_DOMAIN: hostedDomain,
+    PATHS: {
+      INFO: "/shop_payment",
+      CONFIRM: "/shop_payment_complete",
+      SUCCESS: "/payment-success",
+      CANCEL: "/payment-cancel",
+      REFUND: "/payment-refund",
+    },
+  };
 
-    // --- Configurations ---
+  // ---------------- Utilities ----------------
 
-    // 스크립트가 로드된 호스트 도메인을 동적으로 감지 (API 호출 경로 자동 설정)
-    let hostedDomain = 'https://gh-payment-vercel-global-2-0.vercel.app'; // 기본값
+  function pathMatches(targetPath) {
+    const currentPath = location.pathname;
+    return (
+      currentPath === targetPath ||
+      currentPath === targetPath + ".html" ||
+      currentPath === targetPath + "/" ||
+      currentPath.endsWith(targetPath + ".html")
+    );
+  }
+
+  function getRedirectUrl(targetPath) {
+    const isLocal =
+      location.pathname.endsWith(".html") || location.protocol === "file:";
+    return targetPath + (isLocal ? ".html" : "");
+  }
+
+  function getURLParam(name) {
+    const results = new RegExp("[\\?&]" + name + "=([^&#]*)").exec(
+      location.search
+    );
+    return results === null
+      ? ""
+      : decodeURIComponent(results[1].replace(/\+/g, " "));
+  }
+
+  function extractNumber(text) {
+    if (!text) return "";
+    const n = String(text).replace(/[^\d]/g, "");
+    return n || "";
+  }
+
+  // ---------------- ITEM_NAME limit (20 chars + 55 bytes) ----------------
+  const ITEM_NAME_MAX_CHARS = 20;
+  const ITEM_NAME_MAX_BYTES = 55;
+
+  function utf8ByteLength(str) {
     try {
-        if (document.currentScript && document.currentScript.src) {
-            const scriptUrl = new URL(document.currentScript.src);
-            hostedDomain = scriptUrl.origin;
-        }
+      return new TextEncoder().encode(str).length;
     } catch (e) {
-        console.warn(LOG_PREFIX + "Failed to detect hosted domain, using default:", hostedDomain);
+      return unescape(encodeURIComponent(String(str || ""))).length;
     }
+  }
 
-    const CONFIG = {
-        // ✅ 네가 받은 키값으로 교체 완료
-        PUBLIC_KEY: 'pk_1fc0-d72bd2-31f-a22a1',
-        TID: 'TMN009875',
+  function utf8Truncate(str, maxBytes) {
+    if (!str) return "";
+    let s = String(str);
+    if (utf8ByteLength(s) <= maxBytes) return s;
 
-        VERIFY_API: '/api/verify',
-        HOSTED_DOMAIN: hostedDomain,
-        PATHS: {
-            INFO: '/shop_payment',
-            CONFIRM: '/shop_payment_complete',
-            SUCCESS: '/payment-success',
-            CANCEL: '/payment-cancel',
-            REFUND: '/payment-refund'
+    let end = s.length;
+    while (end > 0) {
+      const candidate = s.slice(0, end);
+      if (utf8ByteLength(candidate) <= maxBytes) return candidate;
+      end--;
+    }
+    return "";
+  }
+
+  function normalizeItemName(str) {
+    return String(str || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function limitItemName(str) {
+    const s = normalizeItemName(str);
+    const byChars = s.slice(0, ITEM_NAME_MAX_CHARS);
+    return utf8Truncate(byChars, ITEM_NAME_MAX_BYTES);
+  }
+
+  // ---------------- ✅ 배송정보 "수령인" 안전 추출기 ----------------
+  /**
+   * 배송 정보 섹션의 "수령인" input에서 이름을 읽어옴.
+   * - 어떤 오류가 나도 결제 흐름은 절대 막지 않음 (try-catch 완전 보호)
+   * - 수령인이 비어있으면 빈 문자열 반환 (호출부에서 주문자명 fallback)
+   */
+  function readReceiverName() {
+    try {
+      // 1순위: 아임웹 표준 셀렉터들
+      const candidates = [
+        'input[name="receiverName"]',
+        'input[name="deliveryReceiver"]',
+        'input[name="receiver"]',
+        'input[id="receiverName"]',
+        'input[data-field="receiverName"]',
+      ];
+
+      for (const sel of candidates) {
+        try {
+          const el = document.querySelector(sel);
+          if (el && el.value && String(el.value).trim()) {
+            return String(el.value).trim();
+          }
+        } catch (e) {}
+      }
+
+      // 2순위: placeholder에 "수령인" 있는 input
+      try {
+        const all = document.querySelectorAll(
+          'input[placeholder*="수령인"], input[placeholder*="받는분"], input[placeholder*="받으실"]'
+        );
+        for (const el of all) {
+          if (el && el.value && String(el.value).trim()) {
+            return String(el.value).trim();
+          }
         }
-    };
+      } catch (e) {}
 
-    // --- Helper Functions ---
-
-    function waitForData(selectors, callback, maxRetries = 10) {
-        let retries = 0;
-        const interval = setInterval(() => {
-            let found = null;
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el && el.innerText.trim().length > 0) {
-                    found = el;
-                    break;
+      // 3순위: "배송 정보" 섹션 안에서 첫 번째 텍스트 input
+      try {
+        const allHeaders = document.querySelectorAll("*");
+        for (const h of allHeaders) {
+          const text = ((h.innerText || "") + "").replace(/\s/g, "");
+          if (
+            text === "배송정보" ||
+            text === "배송지정보" ||
+            text === "배송지"
+          ) {
+            // 이 헤더의 부모 컨테이너 안의 input들 스캔
+            const container =
+              h.closest("section") ||
+              h.closest('div[class*="css-"]') ||
+              h.parentElement;
+            if (container) {
+              const inputs = container.querySelectorAll(
+                'input[type="text"], input:not([type])'
+              );
+              for (const inp of inputs) {
+                const ph = (inp.getAttribute("placeholder") || "").toLowerCase();
+                // 전화번호/우편번호/주소 input은 건너뜀
+                if (
+                  ph.includes("전화") ||
+                  ph.includes("연락처") ||
+                  ph.includes("우편") ||
+                  ph.includes("주소") ||
+                  ph.includes("상세")
+                ) {
+                  continue;
                 }
+                if (inp.value && String(inp.value).trim()) {
+                  return String(inp.value).trim();
+                }
+              }
             }
-            if (found || retries >= maxRetries) {
-                clearInterval(interval);
-                callback(found);
+            break;
+          }
+        }
+      } catch (e) {}
+
+      return "";
+    } catch (e) {
+      console.warn(LOG_PREFIX + "readReceiverName error (ignored):", e);
+      return "";
+    }
+  }
+
+  /**
+   * ✅ "총 주문금액" 옆 span 값만 읽는다.
+   */
+  function findTotalOrderAmountStrict() {
+    try {
+      const labelSpans = Array.from(document.querySelectorAll("span")).filter(
+        (s) => (s.innerText || "").trim() === "총 주문금액"
+      );
+
+      for (const label of labelSpans) {
+        const next = label.nextElementSibling;
+        if (next && next.tagName === "SPAN") {
+          const num = extractNumber(next.innerText);
+          if (num && parseInt(num, 10) > 0) {
+            console.log(
+              LOG_PREFIX + "Amount from TOTAL row (next span) =>",
+              num
+            );
+            return num;
+          }
+        }
+
+        const parent = label.parentElement;
+        if (parent) {
+          const amountSpan =
+            parent.querySelector("span.css-nxbuqh") ||
+            parent.querySelector('span[class*="nxbuqh"]') ||
+            parent.querySelector("span:last-child");
+
+          if (amountSpan) {
+            const num = extractNumber(amountSpan.innerText);
+            if (num && parseInt(num, 10) > 0) {
+              console.log(
+                LOG_PREFIX + "Amount from TOTAL row (parent query) =>",
+                num
+              );
+              return num;
             }
-            retries++;
-        }, 500);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(LOG_PREFIX + "findTotalOrderAmountStrict error:", e);
     }
 
-    function pathMatches(targetPath) {
-        const currentPath = location.pathname;
-        return currentPath === targetPath ||
-            currentPath === targetPath + '.html' ||
-            currentPath === targetPath + '/' ||
-            currentPath.endsWith(targetPath + '.html');
+    console.warn(LOG_PREFIX + "TOTAL amount not found (strict) => 0");
+    return "0";
+  }
+
+  function createLoadingOverlay() {
+    if (document.getElementById("fnt-loading-overlay")) return;
+    const overlay = document.createElement("div");
+    overlay.id = "fnt-loading-overlay";
+    overlay.style.cssText =
+      "position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(255,255,255,1); z-index:9998; display:flex; flex-direction:column; align-items:center; justify-content:center; font-family:sans-serif; transition: opacity 0.5s;";
+    const style = document.createElement("style");
+    style.innerHTML = `
+      @keyframes fnt-spin { to { transform: rotate(360deg); } }
+      .fnt-spinner { width: 45px; height: 45px; border: 4px solid #f3f3f3; border-top-color: #000; border-radius: 50%; animation: fnt-spin 1s linear infinite; margin-bottom: 20px; }
+    `;
+    document.head.appendChild(style);
+    overlay.innerHTML = `
+      <div class="fnt-spinner"></div>
+      <div style="font-weight: 600; font-size: 16px; color: #333;">결제 시스템을 불러오고 있습니다...</div>
+    `;
+    document.body.appendChild(overlay);
+  }
+
+  function executePay(params) {
+    console.log(LOG_PREFIX + "Calling MARU.pay", params);
+
+    setTimeout(function () {
+      if (typeof MARU === "undefined") {
+        console.error(LOG_PREFIX + "MARU SDK Not Found.");
+        alert("결제 모듈을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+        location.reload();
+        return;
+      }
+
+      // ✅ ITEM_NAME: 20자 + 55byte 제한 적용
+      const safeItemName = limitItemName(params.itemName || "상품") || "상품";
+
+      // ✅ 구매자명 결정 로직:
+      //    1순위: params.receiverName (배송지 수령인) — 새 저장값
+      //    2순위: params.userName (주문자명) — 기존 fallback
+      //    → 어느 것도 없으면 빈 문자열로 SDK에 전달 (결제 자체는 진행)
+      let safeReceiverName = "";
+      try {
+        safeReceiverName = String(params.receiverName || "").trim();
+      } catch (e) {}
+
+      let safeUserName = "";
+      try {
+        safeUserName = String(params.userName || "").trim();
+      } catch (e) {}
+
+      // 구매자명 최종 (수령인 우선, 없으면 주문자명)
+      // 구매자명 앞에 항상 "SJ" 추가
+      // 예: 김길동 -> SJ김길동
+      const originalPayerName = safeReceiverName || safeUserName || "";
+      const finalPayerName = originalPayerName ? "SJ" + originalPayerName : "";
+
+      let safeUserTel = "";
+      let safeUserEmail = "";
+      try {
+        safeUserTel = String(params.userTel || "").trim();
+      } catch (e) {}
+      try {
+        safeUserEmail = String(params.userEmail || "").trim();
+      } catch (e) {}
+
+      console.log(
+        LOG_PREFIX + "Final payerName for receipt:",
+        finalPayerName,
+        "(receiver:",
+        safeReceiverName,
+        "/ orderer:",
+        safeUserName,
+        ")"
+      );
+
+      // ✅ SDK 호출 자체를 try-catch로 감싸서 절대 결제가 안 막히도록
+      try {
+        MARU.pay({
+          payRoute: "3d",
+          responseFunction: window.paymentResultByJS,
+          publicKey: CONFIG.PUBLIC_KEY,
+          trackId: params.trackId,
+          // 카드 결제창에 전달되는 최종 금액에 6.5% 적용
+          // 예: 267,400원 -> 284,781원
+          amount: String(Math.round((parseInt(params.amount, 10) || 0) * 1.065)),
+          redirectUrl:
+            window.location.origin + getRedirectUrl(CONFIG.PATHS.SUCCESS),
+          itemName: safeItemName,
+
+          // 기존 키 (호환성 유지)
+          userEmail: safeUserEmail,
+          userName: finalPayerName,
+          userTel: safeUserTel,
+
+          // ✅ SDK clientsideV2.js 표준 키 (영수증 PURCHASER 매핑)
+          payerName: finalPayerName,
+          payerTel: safeUserTel,
+
+          mode: "layer",
+          debugMode: "live",
+        });
+      } catch (err) {
+        console.error(LOG_PREFIX + "MARU.pay call failed:", err);
+        alert("결제창을 여는 중 오류가 발생했습니다. 다시 시도해 주세요.");
+      }
+    }, 250);
+  }
+
+  window.paymentResultByJS = function (data) {
+    console.log(LOG_PREFIX + "SDK Callback Data Received:", data);
+    if (!data || !data.result) return;
+
+    const resultCd = data.result.resultCd;
+    const resultMsg = data.result.resultMsg || "";
+    const advanceMsg = data.result.advanceMsg || resultMsg;
+
+    if (resultCd === "0000") {
+      const trackId =
+        data.pay && data.pay.trackId
+          ? data.pay.trackId
+          : getURLParam("order_no");
+      console.log(LOG_PREFIX + "Payment Success. Redirecting...");
+      location.href =
+        getRedirectUrl(CONFIG.PATHS.SUCCESS) +
+        "?status=success&trackId=" +
+        trackId;
+    } else {
+      console.warn(
+        LOG_PREFIX + "Payment Failed/Cancelled:",
+        resultCd,
+        advanceMsg
+      );
+      location.href =
+        getRedirectUrl(CONFIG.PATHS.CANCEL) +
+        "?msg=" +
+        encodeURIComponent(advanceMsg);
     }
+  };
 
-    function getRedirectUrl(targetPath) {
-        const isLocal = location.pathname.endsWith('.html') || location.protocol === 'file:';
-        return targetPath + (isLocal ? '.html' : '');
-    }
+  // ---------------- /shop_payment ----------------
 
-    function getURLParam(name) {
-        const results = new RegExp("[\\?&]" + name + "=([^&#]*)").exec(location.search);
-        return results === null ? "" : decodeURIComponent(results[1].replace(/\+/g, " "));
-    }
+  function handleShopPayment() {
+    console.log(LOG_PREFIX + "Routing: /shop_payment");
 
-    // --- Shared Payment Logic ---
+    function injectCustomPaymentUI() {
+      const timer = setInterval(() => {
+        const headers = Array.from(
+          document.querySelectorAll("header, h2, h3, .title, .css-17g8nhj")
+        );
+        const paymentHeader = headers.find((h) => {
+          const text = (h.innerText || "").replace(/\s/g, "");
+          return text.includes("결제수단");
+        });
+        if (!paymentHeader) return;
 
-    function createLoadingOverlay() {
-        if (document.getElementById('fnt-loading-overlay')) return;
-        const overlay = document.createElement('div');
-        overlay.id = 'fnt-loading-overlay';
-        overlay.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(255,255,255,1); z-index:9998; display:flex; flex-direction:column; align-items:center; justify-content:center; font-family:sans-serif; transition: opacity 0.5s;';
-        const style = document.createElement('style');
-        style.innerHTML = `
-            @keyframes fnt-spin { to { transform: rotate(360deg); } }
-            .fnt-spinner { width: 45px; height: 45px; border: 4px solid #f3f3f3; border-top-color: #000; border-radius: 50%; animation: fnt-spin 1s linear infinite; margin-bottom: 20px; }
+        const paymentSection =
+          paymentHeader.closest('div[class*="css-"]') ||
+          paymentHeader.closest(".pay-method-section") ||
+          paymentHeader.parentElement;
+        if (!paymentSection) return;
+
+        if (paymentSection.querySelector(".pay-method-custom")) {
+          clearInterval(timer);
+          return;
+        }
+
+        const radios = Array.from(
+          document.querySelectorAll('input[type="radio"]')
+        );
+        const bankRadio = radios.find(
+          (r) => r.value && String(r.value).includes("OPM01")
+        );
+        if (!bankRadio) return;
+
+        if (!bankRadio.checked) bankRadio.click();
+
+        let depositorBlock = document.querySelector(".css-1hw29i9");
+        if (!depositorBlock) {
+          const input =
+            document.querySelector('input[placeholder*="입금자명"]') ||
+            document.querySelector('input[name="depositor"]');
+          if (input) {
+            depositorBlock = input.closest("div");
+            if (depositorBlock && depositorBlock.tagName === "LABEL")
+              depositorBlock = depositorBlock.parentElement;
+          }
+        }
+
+        const fieldset = bankRadio.closest("fieldset");
+
+        const customUI = document.createElement("div");
+        customUI.className = "pay-method-custom";
+        customUI.innerHTML = `
+          <style>
+            .pay-method-custom { display:flex; flex-direction:column; gap:12px; margin: 12px 0; }
+            .pay-method-buttons { display:flex; gap:10px; }
+            .pay-method-custom button{
+              flex:1; padding:15px; border:1px solid #ddd; border-radius:8px;
+              background:#fff; font-weight:700; cursor:pointer; font-size:16px;
+            }
+            .pay-method-custom button.active{ border-color:#333; background:#333; color:#fff; }
+            .pay-guide-text{ font-size:14px; color:#666; line-height:1.5; }
+            .pay-guide-text .pay-guide-red{ color:#e60000; font-weight:700; }
+            .pay-guide-text .pay-guide-blue{ color:#0066ff; font-weight:700; }
+            .moved-depositor-block{ margin-top:10px; padding:10px; border:1px solid #eee; border-radius:6px; background:#fafafa; }
+          </style>
+      <div class="pay-guide-text">
+  * 무통장입금시 주문완료후 문자 or 카카오톡으로 결제정보 보내드립니다.<br>
+  <span class="pay-guide-red">* 카드결제의 경우 수수료 6.5프로 별도입니다.</span><br>
+  <span class="pay-guide-blue">* 법인카드 결제시 카카오톡으로 문의바랍니다.</span><br> 
+</div>
+          <div class="pay-method-buttons">
+            <button type="button" data-method="CREDIT" class="active">💳 카드결제</button>
+            <button type="button" data-method="BANK">🏦 무통장입금</button>
+          </div>
+          <div id="fnt-depositor-area"></div>
         `;
-        document.head.appendChild(style);
-        overlay.innerHTML = `
-            <div class="fnt-spinner"></div>
-            <div style="font-weight: 600; font-size: 16px; color: #333;">결제 시스템을 불러오고 있습니다...</div>
-        `;
-        document.body.appendChild(overlay);
-    }
 
-    function executePay(params) {
-        console.log(LOG_PREFIX + "Initiating MARU.pay (Direct)", params);
-        setTimeout(function () {
-            if (typeof MARU !== 'undefined') {
-                MARU.pay({
-                    payRoute: "3d",
-                    responseFunction: window.paymentResultByJS,
-                    publicKey: CONFIG.PUBLIC_KEY,
-                    trackId: params.trackId,
-                    amount: params.amount,
-                    redirectUrl: window.location.origin + getRedirectUrl(CONFIG.PATHS.SUCCESS),
-                    itemName: params.itemName,
-                    userEmail: params.userEmail,
-                    userName: params.userName,
-                    userTel: params.userTel,
-                    mode: 'layer',
-                    debugMode: 'live'
-                });
-            } else {
-                console.error(LOG_PREFIX + "MARU SDK Not Found.");
-                alert("결제 모듈을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
-                location.reload();
-            }
-        }, 500);
-    }
+        paymentHeader.insertAdjacentElement("afterend", customUI);
 
-    window.paymentResultByJS = function (data) {
-        console.log(LOG_PREFIX + "SDK Callback Data Received:", data);
-        if (!data || !data.result) return;
-
-        var resultCd = data.result.resultCd;
-        var resultMsg = data.result.resultMsg || '';
-        var advanceMsg = data.result.advanceMsg || resultMsg;
-
-        if (resultCd === '0000') {
-            // 결제 성공
-            var trackId = (data.pay && data.pay.trackId) ? data.pay.trackId : getURLParam('order_no');
-            console.log(LOG_PREFIX + "Payment Success! Redirecting to Result Page...");
-            location.href = getRedirectUrl(CONFIG.PATHS.SUCCESS) + '?status=success&trackId=' + trackId;
-        } else {
-            // 결제 실패 또는 취소
-            console.warn(LOG_PREFIX + "Payment Failed/Cancelled. Code:", resultCd, "Msg:", advanceMsg);
-            location.href = getRedirectUrl(CONFIG.PATHS.CANCEL) + '?msg=' + encodeURIComponent(advanceMsg);
-        }
-    };
-
-    function handleShopPayment() {
-        console.log(LOG_PREFIX + "Routing: Order Info Page");
-
-        function injectCustomPaymentUI() {
-            const checkInterval = setInterval(() => {
-                // 결제수단 섹션 찾기 (헤더 텍스트로 찾음)
-                const headers = Array.from(document.querySelectorAll('header, h2, h3, .title, .css-17g8nhj'));
-                const paymentHeader = headers.find(h => h.innerText.includes('결제수단'));
-
-                if (!paymentHeader) return;
-
-                const paymentSection = paymentHeader.closest('div[class*="css-"]') || paymentHeader.closest('.pay-method-section') || paymentHeader.parentElement;
-                if (!paymentSection) return;
-
-                // 이미 주입되었는지 확인
-                if (paymentSection.querySelector('.pay-method-custom')) {
-                    clearInterval(checkInterval);
-                    return;
-                }
-
-                // 무통장입금 라디오 버튼 찾기 (필수)
-                const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-                const bankRadio = radios.find(r => r.value && r.value.includes('OPM01'));
-
-                if (!bankRadio) return;
-
-                // 무통장입금 라디오 강제 선택
-                if (!bankRadio.checked) bankRadio.click();
-
-                // 입금자명/은행선택 컨테이너(.css-1hw29i9) 찾아서 커스텀UI로 이동
-                let depositorBlock = document.querySelector('.css-1hw29i9');
-                if (!depositorBlock) {
-                    const input = document.querySelector('input[placeholder*="입금자명"]') || document.querySelector('input[name="depositor"]');
-                    if (input) {
-                        depositorBlock = input.closest('div') === input.parentElement ? input.parentElement : input.closest('div');
-                        if (depositorBlock && depositorBlock.tagName === 'LABEL') depositorBlock = depositorBlock.parentElement;
-                    }
-                }
-
-                console.log(LOG_PREFIX + "Depositor Block found for extraction:", depositorBlock);
-
-                // 커스텀 UI HTML 생성
-                const customUI = document.createElement('div');
-                customUI.className = 'pay-method-custom';
-                customUI.innerHTML = `
-                <style>
-                    .pay-method-custom { display: flex; flex-direction: column; gap: 15px; margin: 15px 0; }
-                    .pay-method-buttons { display: flex; gap: 10px; }
-                    .pay-method-custom button {
-                        flex: 1;
-                        padding: 15px;
-                        border: 1px solid #ddd;
-                        border-radius: 8px;
-                        background: #fff;
-                        font-weight: bold;
-                        cursor: pointer;
-                        font-size: 16px;
-                    }
-                    .pay-method-custom button.active {
-                        border-color: #333;
-                        background: #333;
-                        color: #fff;
-                    }
-                    .pay-guide-text { font-size: 13px; color: #666; margin-bottom: 5px; line-height: 1.5; }
-                    .moved-depositor-block { margin-top: 10px; padding: 10px; border: 1px solid #eee; border-radius: 4px; background: #fafafa; }
-                </style>
-                <div class="pay-guide-text">
-                    * 아래 버튼을 눌러 결제수단을 선택해주세요.<br>
-                    * 카드결제 오류 시 고객센터로 문의주세요.
-                </div>
-                <div class="pay-method-buttons">
-                    <button type="button" data-method="CREDIT" class="active">💳 카드결제</button>
-                    <button type="button" data-method="BANK">🏦 무통장입금</button>
-                </div>
-                <div id="fnt-depositor-area"></div>
-            `;
-
-                // 헤더 바로 다음에 주입
-                paymentHeader.insertAdjacentElement('afterend', customUI);
-
-                // 입금자명 입력란 커스텀 UI로 이동
-                if (depositorBlock) {
-                    depositorBlock.classList.add('moved-depositor-block');
-                    customUI.querySelector('#fnt-depositor-area').appendChild(depositorBlock);
-                }
-
-                // 기존 fieldset 숨기기
-                const fieldset = bankRadio.closest('fieldset');
-                if (fieldset) fieldset.style.display = 'none';
-
-                // 이벤트 리스너
-                const buttons = customUI.querySelectorAll('button');
-                const bankSelect = document.querySelector('select[name^="cash_idx"]');
-                const depositorInput = customUI.querySelector('input[placeholder*="입금자명"]') || customUI.querySelector('input[name="depositor"]');
-
-                updatePaymentState('CREDIT', bankSelect, depositorInput, depositorBlock);
-
-                buttons.forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        const method = e.target.getAttribute('data-method');
-                        console.log(LOG_PREFIX + "Button Clicked:", method);
-
-                        buttons.forEach(b => b.classList.remove('active'));
-                        e.target.classList.add('active');
-
-                        updatePaymentState(method, bankSelect, depositorInput, depositorBlock);
-                    });
-                });
-
-                console.log(LOG_PREFIX + "Custom Payment UI Injected & Block Extracted");
-                clearInterval(checkInterval);
-
-            }, 500);
+        if (depositorBlock) {
+          depositorBlock.classList.add("moved-depositor-block");
+          const area = customUI.querySelector("#fnt-depositor-area");
+          if (area) area.appendChild(depositorBlock);
         }
 
-        function updatePaymentState(method, bankSelect, depositorInput, depositorBlock) {
-            console.log(LOG_PREFIX + "updatePaymentState:", method, depositorBlock);
+        const area = customUI.querySelector("#fnt-depositor-area");
+        const moved = area && depositorBlock;
+        if (fieldset && moved) fieldset.style.display = "none";
 
-            const stateMethod = method === 'CREDIT' ? 'CreditCard' : 'BankTransfer';
-            localStorage.setItem('payMethod', stateMethod);
+        function applyMethodUI(method) {
+          const stateMethod =
+            method === "CREDIT" ? "CreditCard" : "BankTransfer";
+          localStorage.setItem("payMethod", stateMethod);
 
+          if (method === "CREDIT") {
+            if (depositorBlock) depositorBlock.style.display = "none";
+          } else {
             if (depositorBlock) {
-                if (method === 'CREDIT') {
-                    depositorBlock.style.display = 'none';
-                    if (depositorInput) depositorInput.value = '카드결제';
-                } else {
-                    depositorBlock.style.display = 'flex';
-                    depositorBlock.style.flexDirection = 'column';
-                    depositorBlock.style.gap = '8px';
-                    if (depositorInput && depositorInput.value === '카드결제') depositorInput.value = '';
-                }
-            } else if (depositorInput) {
-                depositorInput.style.display = (method === 'CREDIT') ? 'none' : 'block';
+              depositorBlock.style.display = "flex";
+              depositorBlock.style.flexDirection = "column";
+              depositorBlock.style.gap = "8px";
             }
-
-            if (bankSelect) {
-                if (bankSelect.options.length > 1) {
-                    const index = (method === 'CREDIT') ? 0 : 1;
-                    if (bankSelect.options.length > index) {
-                        bankSelect.selectedIndex = index;
-                        bankSelect.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                }
-            }
+          }
         }
 
-        function saveCurrentState(source = "Manual", overrideMethod = null) {
-            let ordererName = document.querySelector('input[name="ordererName"]')?.value || '';
-            let ordererTel = document.querySelector('input[name="ordererCall"]')?.value || '';
-            let ordererEmail = document.querySelector('input[name="ordererEmail"]')?.value || '';
-
-            if (!ordererName || !ordererTel) {
-                const headers = Array.from(document.querySelectorAll('header, h2, h3, .title, .css-17g8nhj'));
-                const orderHeader = headers.find(h => {
-                    const text = h.innerText.replace(/\s/g, '');
-                    return text.includes('주문자정보') || text.includes('주문자');
-                });
-
-                if (orderHeader) {
-                    let container = orderHeader.nextElementSibling;
-                    if (!container || container.tagName === 'HR') container = orderHeader.parentElement;
-
-                    if (container) {
-                        const candidates = Array.from(container.querySelectorAll('p, span, div'))
-                            .filter(el => {
-                                if (el.children.length > 0 && el.innerText.length > 50) return false;
-                                const text = el.innerText.trim();
-                                if (text.length < 2) return false;
-                                if (text.includes('가상계좌') || text.includes('무통장') || text.includes('입금')) return false;
-                                if (['수정', '관리자'].includes(text)) return false;
-                                return true;
-                            });
-
-                        const telRegex = /01[016789]-?\d{3,4}-?\d{4}/;
-                        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-                        candidates.forEach(el => {
-                            const text = el.innerText.trim();
-                            if (!ordererTel && telRegex.test(text)) ordererTel = text.match(telRegex)[0];
-                            if (!ordererEmail && emailRegex.test(text)) ordererEmail = text;
-                            if (!ordererName && !telRegex.test(text) && !emailRegex.test(text) && /^[가-힣]{2,5}$/.test(text)) {
-                                ordererName = text;
-                            }
-                        });
-
-                        if (!ordererName && candidates.length >= 2) {
-                            ordererName = candidates[0].innerText.trim();
-                            if (!ordererTel) ordererTel = candidates[1].innerText.trim();
-                        }
-                    }
-                }
-            }
-
-            const itemNameEl = document.querySelector('.css-a0a2v3') || document.querySelector('._product_name');
-            const qtyEl = document.querySelector('.css-15fzge') || document.querySelector('._product_qty');
-            const totalAmountEl = document.querySelector('.css-x99dng') || document.querySelector('.css-z3pbio') || document.querySelector('.css-1i1erzf') || document.querySelector('._total_price') || document.querySelector('.total_price');
-
-            const itemName = itemNameEl ? itemNameEl.innerText.trim() : '상품';
-            const qty = qtyEl ? qtyEl.innerText.replace(/[^0-9]/g, '') : '1';
-            const totalAmount = totalAmountEl ? totalAmountEl.innerText.replace(/[^0-9]/g, '') : '0';
-
-            let method = overrideMethod;
-            if (!method) {
-                const uiState = localStorage.getItem('payMethod');
-                if (uiState === 'CreditCard') method = 'CREDIT';
-                else if (uiState === 'BankTransfer') method = 'BANK';
-                else {
-                    const activeBtn = document.querySelector('.pay-method-custom button.active');
-                    method = activeBtn ? activeBtn.getAttribute('data-method') : 'BANK';
-                }
-            }
-
-            let urlOrderNo = getURLParam('order_no');
-            const paymentData = {
-                orderNo: urlOrderNo || ('ORD-' + new Date().getTime()),
-                amount: totalAmount,
-                userName: ordererName,
-                userTel: ordererTel,
-                userEmail: ordererEmail,
-                itemName: itemName,
-                qty: qty,
-                method: method
-            };
-
-            if (totalAmount !== '0') {
-                localStorage.setItem('fintree_pay_data', JSON.stringify(paymentData));
-                console.log(LOG_PREFIX + `Auto-Save [${source}] [${method}]:`, paymentData);
-                return paymentData;
-            }
-            return null;
+        const buttons = customUI.querySelectorAll("button[data-method]");
+        function setActive(method) {
+          buttons.forEach((b) => b.classList.remove("active"));
+          const btn = customUI.querySelector(`button[data-method="${method}"]`);
+          if (btn) btn.classList.add("active");
+          applyMethodUI(method);
+          saveCurrentState("Method Switch", method);
         }
 
-        window.addEventListener('load', function () {
-            const inputNames = ["ordererName", "ordererCall", "ordererEmail"];
-            inputNames.forEach(name => {
-                const el = document.querySelector(`input[name="${name}"]`);
-                if (el) el.addEventListener('input', () => saveCurrentState("Input Event"));
-            });
-
-            setInterval(() => {
-                if (pathMatches(CONFIG.PATHS.INFO)) saveCurrentState("Background Timer");
-            }, 2000);
-
-            document.addEventListener('click', function (e) {
-                const btn = e.target.closest('button[type="submit"], ._btn_payment, .css-1tf84sl, .css-clap0e');
-                if (btn && btn.innerText.includes('결제하기')) {
-                    console.log(LOG_PREFIX + "Payment button clicked. Allowing form submission.");
-                    return true;
-                }
-            }, true);
+        buttons.forEach((btn) => {
+          btn.addEventListener("click", (e) => {
+            const method = e.currentTarget.getAttribute("data-method");
+            console.log(LOG_PREFIX + "Method clicked:", method);
+            setActive(method);
+          });
         });
 
-        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', injectCustomPaymentUI);
-        else injectCustomPaymentUI();
+        localStorage.setItem("payMethod", "BankTransfer");
+        setActive("BANK");
 
-        setInterval(() => { saveCurrentState(); }, 1000);
+        console.log(LOG_PREFIX + "Custom Payment UI injected");
+        clearInterval(timer);
+      }, 400);
     }
 
-    function handleShopPaymentComplete() {
-        console.log(LOG_PREFIX + "Routing: Auth/Confirmation Page");
+    function saveCurrentState(source = "Manual", overrideMethod = null) {
+      // ✅ 모든 추출은 try-catch로 보호 (오류 나도 결제 진행)
+      let ordererName = "";
+      let ordererTel = "";
+      let ordererEmail = "";
+      let receiverName = "";
 
-        function startButtonWatcher(p) {
-            const observer = new MutationObserver((mutations, obs) => {
-                const container = document.querySelector('.css-k008qs');
-                if (container && !document.querySelector('.pay-button-fintree')) {
-                    const btn = document.createElement('a');
-                    btn.href = 'javascript:void(0)';
-                    btn.className = 'pay-button css-fi2s5q pay-button-fintree';
-                    btn.innerText = '신용카드';
-                    btn.onclick = function (e) {
-                        e.preventDefault();
-                        createLoadingOverlay();
-                        executePay(p);
-                    };
-                    container.appendChild(btn);
-                    obs.disconnect();
-                }
-            });
-            observer.observe(document.body, { childList: true, subtree: true });
+      try {
+        ordererName =
+          document.querySelector('input[name="ordererName"]')?.value || "";
+      } catch (e) {}
+      try {
+        ordererTel =
+          document.querySelector('input[name="ordererCall"]')?.value || "";
+      } catch (e) {}
+      try {
+        ordererEmail =
+          document.querySelector('input[name="ordererEmail"]')?.value || "";
+      } catch (e) {}
+
+      // ✅ 배송지 수령인 (오류 나도 결제 진행)
+      try {
+        receiverName = readReceiverName();
+      } catch (e) {
+        console.warn(LOG_PREFIX + "readReceiverName failed (ignored):", e);
+      }
+
+      // Item name (best effort)
+      let itemName = "상품";
+      try {
+        const itemNameEl =
+          document.querySelector(".css-a0a2v3") ||
+          document.querySelector("._product_name") ||
+          document.querySelector('[class*="product"] [class*="name"]');
+        itemName = itemNameEl ? (itemNameEl.innerText || "").trim() : "상품";
+        itemName = limitItemName(itemName) || "상품";
+      } catch (e) {
+        itemName = "상품";
+      }
+
+      // Qty
+      let qty = "1";
+      try {
+        const qtyEl =
+          document.querySelector(".css-15fzge") ||
+          document.querySelector("._product_qty");
+        qty = qtyEl ? extractNumber(qtyEl.innerText) || "1" : "1";
+      } catch (e) {}
+
+      const totalAmount = findTotalOrderAmountStrict();
+
+      let method = overrideMethod;
+      if (!method) {
+        try {
+          const uiState = localStorage.getItem("payMethod");
+          if (uiState === "CreditCard") method = "CREDIT";
+          else if (uiState === "BankTransfer") method = "BANK";
+          else method = "BANK";
+        } catch (e) {
+          method = "BANK";
         }
+      }
 
-        window.addEventListener('load', function () {
-            let params = {
-                trackId: getURLParam('order_no'),
-                amount: '0',
-                userName: '',
-                userTel: '',
-                userEmail: '',
-                itemName: '상품'
-            };
+      const urlOrderNo = getURLParam("order_no");
+      const paymentData = {
+        orderNo: urlOrderNo || "ORD-" + Date.now(),
+        amount: totalAmount,
+        userName: ordererName,       // 주문자명 (기존)
+        userTel: ordererTel,
+        userEmail: ordererEmail,
+        receiverName: receiverName,  // ✅ 배송지 수령인 (신규 추가)
+        itemName: itemName,
+        qty: qty,
+        method: method,
+      };
 
-            try {
-                var stored = JSON.parse(localStorage.getItem('fintree_pay_data'));
-                if (stored) {
-                    if (!params.trackId) params.trackId = stored.orderNo;
-                    if (stored.amount) params.amount = stored.amount;
-                    params.userName = stored.userName;
-                    params.userTel = stored.userTel;
-                    params.userEmail = stored.userEmail;
+      try {
+        localStorage.setItem("fintree_pay_data", JSON.stringify(paymentData));
+      } catch (e) {
+        console.warn(LOG_PREFIX + "localStorage.setItem failed:", e);
+      }
 
-                    var baseName = stored.itemName || "상품";
-                    if (baseName.length > 20) baseName = baseName.substring(0, 20) + "...";
-                    params.itemName = baseName + (stored.qty > 1 ? " 외 " + (stored.qty - 1) + "건" : "");
+      console.log(
+        LOG_PREFIX + `Saved fintree_pay_data [${source}] =>`,
+        paymentData
+      );
 
-                    if (params.trackId && params.trackId !== stored.orderNo) {
-                        console.log(LOG_PREFIX + "Updating localStorage orderNo:", stored.orderNo, "->", params.trackId);
-                        stored.orderNo = params.trackId;
-                        localStorage.setItem('fintree_pay_data', JSON.stringify(stored));
-                    }
+      if (!totalAmount || totalAmount === "0") {
+        console.warn(LOG_PREFIX + "Amount not found => 0 (blocked)");
+      }
+      return paymentData;
+    }
 
-                    startButtonWatcher(params);
-
-                    if (stored.method === 'CREDIT') {
-                        console.log(LOG_PREFIX + "Detected CREDIT intent from previous step. Launching Payment...");
-
-                        if (stored.status === 'DONE') {
-                            console.log("Payment already completed for this session.");
-                            return;
-                        }
-
-                        createLoadingOverlay();
-                        executePay(params);
-                    }
-                }
-            } catch (e) {
-                console.error(LOG_PREFIX + "Storage Parse Error", e);
-            }
+    window.addEventListener("load", function () {
+      // ✅ 주문자 정보 input 이벤트
+      try {
+        ["ordererName", "ordererCall", "ordererEmail"].forEach((name) => {
+          const el = document.querySelector(`input[name="${name}"]`);
+          if (el) el.addEventListener("input", () => saveCurrentState("Input"));
         });
-    }
+      } catch (e) {}
 
-    function handlePaymentSuccess() {
-        console.log(LOG_PREFIX + "Routing: Result Page");
+      // ✅ 배송지 수령인 input 이벤트 (여러 이름 후보)
+      try {
+        [
+          "receiverName",
+          "deliveryReceiver",
+          "receiver",
+        ].forEach((name) => {
+          const el = document.querySelector(`input[name="${name}"]`);
+          if (el)
+            el.addEventListener("input", () =>
+              saveCurrentState("Receiver Input")
+            );
+        });
 
-        function parseSDKResult() {
-            try {
-                const resultParam = getURLParam('result');
-                if (resultParam) {
-                    let cleaned = resultParam;
-                    if (cleaned.startsWith('"') && cleaned.endsWith('"')) cleaned = cleaned.slice(1, -1);
-                    cleaned = cleaned.replace(/\\"/g, '"');
-                    const parsed = JSON.parse(cleaned);
-                    console.log(LOG_PREFIX + "SDK Result parsed from URL:", parsed);
-                    return parsed;
-                }
-            } catch (e) {
-                console.warn(LOG_PREFIX + "Failed to parse SDK result param:", e);
-            }
-            return null;
+        // placeholder 기반 수령인 input에도 리스너 추가
+        const receiverInputs = document.querySelectorAll(
+          'input[placeholder*="수령인"], input[placeholder*="받는분"]'
+        );
+        receiverInputs.forEach((el) => {
+          el.addEventListener("input", () =>
+            saveCurrentState("Receiver Input(placeholder)")
+          );
+        });
+      } catch (e) {}
+
+      // Keep amount fresh (DOM changes)
+      setInterval(() => {
+        if (pathMatches(CONFIG.PATHS.INFO)) {
+          try {
+            saveCurrentState("Timer");
+          } catch (e) {}
         }
+      }, 1000);
 
-        async function verifyPayment() {
-            const status = getURLParam('status');
-            let trackId = getURLParam('trackId');
-            let trxId = null;
-            let sdkResult = null;
-
-            sdkResult = parseSDKResult();
-            if (sdkResult && sdkResult.pay) {
-                if (!trackId && sdkResult.pay.trackId) trackId = sdkResult.pay.trackId;
-                if (sdkResult.pay.trxId) trxId = sdkResult.pay.trxId;
+      // On "결제하기" click: save then allow Imweb submit
+      document.addEventListener(
+        "click",
+        function (e) {
+          try {
+            const btn = e.target.closest(
+              'button[type="submit"], ._btn_payment, .css-1tf84sl, .css-clap0e'
+            );
+            if (btn && (btn.innerText || "").includes("결제하기")) {
+              console.log(
+                LOG_PREFIX +
+                  "결제하기 clicked -> save state then allow submit"
+              );
+              saveCurrentState("Submit Click");
+              return true;
             }
+          } catch (err) {
+            console.warn(LOG_PREFIX + "click handler error (ignored):", err);
+          }
+        },
+        true
+      );
+    });
 
-            if (!trackId) {
-                try {
-                    const stored = JSON.parse(localStorage.getItem('fintree_pay_data'));
-                    if (stored && stored.orderNo) trackId = stored.orderNo;
-                } catch (e) { }
-            }
-
-            let isSuccess = false;
-
-            if (sdkResult && sdkResult.result && sdkResult.result.resultCd === '0000') isSuccess = true;
-            else if (status === 'success' && trackId) isSuccess = true;
-
-            if (isSuccess) {
-                console.log(LOG_PREFIX + "Payment confirmed.");
-
-                try {
-                    if (CONFIG.VERIFY_API) {
-                        let verifyParams = new URLSearchParams();
-                        if (trackId) verifyParams.append('trackId', trackId);
-                        if (trxId) verifyParams.append('trxId', trxId);
-
-                        try {
-                            const stored = JSON.parse(localStorage.getItem('fintree_pay_data'));
-                            if (stored) {
-                                if (stored.userName) verifyParams.append('userName', stored.userName);
-                                if (stored.userTel) verifyParams.append('userTel', stored.userTel);
-                                if (stored.userEmail) verifyParams.append('userEmail', stored.userEmail);
-                            }
-                        } catch (e) { }
-
-                        fetch(`${CONFIG.HOSTED_DOMAIN}${CONFIG.VERIFY_API}?${verifyParams.toString()}`)
-                            .then(r => r.json())
-                            .then(data => console.log(LOG_PREFIX + "Verify API (background):", data.result))
-                            .catch(err => console.warn(LOG_PREFIX + "Verify API background error (ignored):", err.message));
-                    }
-                } catch (e) {
-                    console.warn(LOG_PREFIX + "Background verify call failed (ignored):", e.message);
-                }
-
-            } else {
-                let failMsg = "결제가 완료되지 않았습니다.";
-                if (sdkResult && sdkResult.result && sdkResult.result.advanceMsg) failMsg = sdkResult.result.advanceMsg;
-                else if (status === 'fail') failMsg = getURLParam('msg') || failMsg;
-
-                console.warn(LOG_PREFIX + "Payment not successful:", failMsg);
-                location.href = getRedirectUrl(CONFIG.PATHS.CANCEL) + '?msg=' + encodeURIComponent(failMsg);
-            }
-        }
-
-        window.addEventListener('load', verifyPayment);
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", injectCustomPaymentUI);
+    } else {
+      injectCustomPaymentUI();
     }
+  }
 
-    function handlePaymentCancel() {
-        console.log(LOG_PREFIX + "Routing: Cancel Page");
+  // ---------------- /shop_payment_complete ----------------
+
+  function handleShopPaymentComplete() {
+    console.log(LOG_PREFIX + "Routing: /shop_payment_complete");
+
+    window.addEventListener("load", function () {
+      const urlOrderNo = getURLParam("order_no");
+
+      let stored = null;
+      try {
+        stored = JSON.parse(localStorage.getItem("fintree_pay_data"));
+      } catch (e) {}
+
+      // ✅ complete 페이지에서도 수령인 한 번 더 시도 (DOM에 있으면)
+      let liveReceiverName = "";
+      try {
+        liveReceiverName = readReceiverName();
+      } catch (e) {}
+
+      const params = {
+        trackId:
+          urlOrderNo ||
+          (stored && stored.orderNo) ||
+          "ORD-" + Date.now(),
+        amount: stored && stored.amount ? String(stored.amount) : "0",
+        userName: (stored && stored.userName) || "",
+        userTel: (stored && stored.userTel) || "",
+        userEmail: (stored && stored.userEmail) || "",
+        receiverName:
+          (stored && stored.receiverName) || liveReceiverName || "",
+        itemName:
+          limitItemName((stored && stored.itemName) || "상품") || "상품",
+      };
+
+      console.log(LOG_PREFIX + "Final params:", params);
+
+      if (!params.amount || params.amount === "0") {
+        alert(
+          location.hostname +
+            " 내용:\n\n결제금액을 읽지 못해서 결제를 진행할 수 없습니다. (amount=0)\n" +
+            "현재 페이지가 아니라 /shop_payment에서 '총 주문금액'을 못 읽은 상태입니다.\n" +
+            "F12 콘솔에서 'Amount from TOTAL row' 로그 캡처를 보내주세요."
+        );
+        console.error(LOG_PREFIX + "Blocked: amount=0", params);
+        return;
+      }
+
+      if (stored && stored.method === "CREDIT") {
+        console.log(
+          LOG_PREFIX + "CREDIT intent detected -> open payment layer now"
+        );
+        try {
+          createLoadingOverlay();
+        } catch (e) {}
+        executePay(params);
+      } else {
+        console.log(LOG_PREFIX + "BANK intent or unknown -> no auto payment");
+      }
+    });
+  }
+
+  // ---------------- Router ----------------
+
+  function initRouter() {
+    try {
+      if (pathMatches(CONFIG.PATHS.INFO)) handleShopPayment();
+      else if (pathMatches(CONFIG.PATHS.CONFIRM)) handleShopPaymentComplete();
+    } catch (e) {
+      console.error(LOG_PREFIX + "Router error (script continues):", e);
     }
+  }
 
-    function handlePaymentRefund() {
-        console.log(LOG_PREFIX + "Routing: Refund Page");
-
-        function setupRefundButton(btn) {
-            btn.onclick = async function () {
-                const rootTrackId = document.getElementById('rootTrackId').value;
-                const rootTrxDay = document.getElementById('rootTrxDay').value;
-                const amount = document.getElementById('amount').value;
-                const display = document.getElementById('result-display');
-
-                if (!rootTrackId || !rootTrxDay) {
-                    alert('주문번호와 거래일자를 입력해 주세요.');
-                    return;
-                }
-
-                if (!confirm('정말로 해당 결제를 취소하시겠습니까?')) return;
-
-                btn.disabled = true;
-                btn.innerText = '취소 처리 중...';
-                display.style.display = 'none';
-
-                const refundData = {
-                    refund: {
-                        rootTrackId: rootTrackId,
-                        rootTrxDay: rootTrxDay,
-                        amount: amount ? parseInt(amount) : null,
-                        trackId: 'REF-' + new Date().getTime(),
-                        trxType: "ONTR"
-                    }
-                };
-
-                console.log(LOG_PREFIX + "Requesting Refund...", refundData);
-
-                try {
-                    const response = await fetch(CONFIG.HOSTED_DOMAIN + '/api/refund', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(refundData)
-                    });
-                    const data = await response.json();
-
-                    display.style.display = 'block';
-                    if (data.result && data.result.resultCd === '0000') {
-                        display.innerText = '✅ 결제 취소가 완료되었습니다. (' + data.result.advanceMsg + ')';
-                        display.className = 'success';
-                    } else {
-                        display.innerText = '❌ 취소 실패: ' + (data.result ? data.result.advanceMsg : '알 수 없는 오류');
-                        display.className = 'error';
-                    }
-                } catch (e) {
-                    console.error(LOG_PREFIX + "Refund API Error:", e);
-                    display.innerText = '❌ 통신 중 오류가 발생했습니다.';
-                    display.className = 'error';
-                    display.style.display = 'block';
-                } finally {
-                    btn.disabled = false;
-                    btn.innerText = '즉시 취소하기';
-                }
-            };
-        }
-
-        const btn = document.getElementById('refund-btn');
-        if (btn) setupRefundButton(btn);
-        else {
-            setTimeout(() => {
-                const retryBtn = document.getElementById('refund-btn');
-                if (retryBtn) setupRefundButton(retryBtn);
-                else console.warn(LOG_PREFIX + "Refund Button Not Found");
-            }, 500);
-        }
-    }
-
-    // --- Boot (Routing) ---
-    function initRouter() {
-        if (pathMatches(CONFIG.PATHS.INFO)) handleShopPayment();
-        else if (pathMatches(CONFIG.PATHS.CONFIRM)) handleShopPaymentComplete();
-        else if (pathMatches(CONFIG.PATHS.SUCCESS)) handlePaymentSuccess();
-        else if (pathMatches(CONFIG.PATHS.CANCEL)) handlePaymentCancel();
-        else if (pathMatches(CONFIG.PATHS.REFUND)) handlePaymentRefund();
-    }
-
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initRouter);
-    else initRouter();
-
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initRouter);
+  } else {
+    initRouter();
+  }
 })();
