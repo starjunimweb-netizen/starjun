@@ -420,132 +420,118 @@
   function handleShopPayment() {
     console.log(LOG_PREFIX + "Routing: /shop_payment");
 
+    // Safari/Imweb: initialize card intent before rendering the custom controls.
+    let selectedMethod = "CREDIT";
+    window.__fntPayMethod = "CREDIT";
+    try { localStorage.setItem("payMethod", "CreditCard"); } catch (e) {}
+
+    // Hide the original bank fields while card is selected, including after React rerenders.
+    function syncBankVisibility() {
+      const card = selectedMethod === "CREDIT";
+      const originalRadio = Array.from(document.querySelectorAll('input[type="radio"]'))
+        .find(r => String(r.value || "").includes("OPM01"));
+      const bankFieldset = originalRadio && originalRadio.closest("fieldset");
+      if (bankFieldset) bankFieldset.style.setProperty("display", "none", "important");
+      const candidates = Array.from(document.querySelectorAll(
+        '.css-1hw29i9, input[placeholder*="입금자명"], input[name="depositor"], #fnt-depositor-area'
+      ));
+      candidates.forEach(el => {
+        let target = el;
+        if (el.matches('input')) target = el.closest('.moved-depositor-block') || el.parentElement;
+        if (!target) return;
+        if (target.id === 'fnt-depositor-area' || target.classList.contains('moved-depositor-block') || target.classList.contains('css-1hw29i9') || el.matches('input')) {
+          if (card) target.style.setProperty('display', 'none', 'important');
+          else target.style.removeProperty('display');
+        }
+      });
+    }
+
+    let scheduled = false;
+    const observer = new MutationObserver(() => {
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        try { syncBankVisibility(); injectCustomPaymentUI(); } catch (e) {
+          console.warn(LOG_PREFIX + 'UI refresh error:', e);
+        }
+      });
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+
     function injectCustomPaymentUI() {
-      const timer = setInterval(() => {
-        const headers = Array.from(
-          document.querySelectorAll("header, h2, h3, .title, .css-17g8nhj")
-        );
-        const paymentHeader = headers.find((h) => {
-          const text = (h.innerText || "").replace(/\s/g, "");
-          return text.includes("결제수단");
+      try {
+        const paymentHeader = Array.from(document.querySelectorAll(
+          'header,h1,h2,h3,h4,h5,h6,legend,label,span,div,p,strong'
+        )).find(el => {
+          if (el.closest('.pay-method-custom')) return false;
+          const ownText = Array.from(el.childNodes).filter(n => n.nodeType === 3)
+            .map(n => n.textContent).join('').replace(/\s/g, '');
+          const text = (el.textContent || '').replace(/\s/g, '');
+          return ownText === '결제수단' || ownText === '결제방법' ||
+            (el.matches('header,h1,h2,h3,h4,h5,h6,legend') &&
+              (text === '결제수단' || text === '결제방법'));
         });
-        if (!paymentHeader) return;
-
-        const paymentSection =
-          paymentHeader.closest('div[class*="css-"]') ||
-          paymentHeader.closest(".pay-method-section") ||
-          paymentHeader.parentElement;
-        if (!paymentSection) return;
-
-        if (paymentSection.querySelector(".pay-method-custom")) {
-          clearInterval(timer);
-          return;
-        }
-
-        const radios = Array.from(
-          document.querySelectorAll('input[type="radio"]')
-        );
-        const bankRadio = radios.find(
-          (r) => r.value && String(r.value).includes("OPM01")
-        );
-        if (!bankRadio) return;
-
-        if (!bankRadio.checked) bankRadio.click();
-
-        let depositorBlock = document.querySelector(".css-1hw29i9");
-        if (!depositorBlock) {
-          const input =
-            document.querySelector('input[placeholder*="입금자명"]') ||
-            document.querySelector('input[name="depositor"]');
-          if (input) {
-            depositorBlock = input.closest("div");
-            if (depositorBlock && depositorBlock.tagName === "LABEL")
-              depositorBlock = depositorBlock.parentElement;
-          }
-        }
-
-        const fieldset = bankRadio.closest("fieldset");
-
-        const customUI = document.createElement("div");
-        customUI.className = "pay-method-custom";
+        if (!paymentHeader || document.querySelector('.pay-method-custom')) return;
+        const customUI = document.createElement('div');
+        customUI.className = 'pay-method-custom';
         customUI.innerHTML = `
           <style>
-            .pay-method-custom { display:flex; flex-direction:column; gap:12px; margin: 12px 0; }
-            .pay-method-buttons { display:flex; gap:10px; }
-            .pay-method-custom button{
-              flex:1; padding:15px; border:1px solid #ddd; border-radius:8px;
-              background:#fff; font-weight:700; cursor:pointer; font-size:16px;
-            }
-            .pay-method-custom button.active{ border-color:#333; background:#333; color:#fff; }
-            .pay-guide-text{ font-size:14px; color:#666; line-height:1.5; }
-            .pay-guide-text .pay-guide-red{ color:#e60000; font-weight:700; }
-            .pay-guide-text .pay-guide-blue{ color:#0066ff; font-weight:700; }
-            .moved-depositor-block{ margin-top:10px; padding:10px; border:1px solid #eee; border-radius:6px; background:#fafafa; }
+            .pay-method-custom{display:flex;flex-direction:column;gap:12px;margin:12px 0}
+            .pay-method-buttons{display:flex;gap:10px}
+            .pay-method-custom button{flex:1;padding:15px;border:1px solid #ddd;border-radius:8px;background:#fff;font-weight:700;cursor:pointer;font-size:16px}
+            .pay-method-custom button.active{border-color:#333;background:#333;color:#fff}
+            .pay-guide-text{font-size:14px;color:#666;line-height:1.5}
+            .pay-guide-red{color:#e60000;font-weight:700}
+            .pay-guide-blue{color:#0066ff;font-weight:700}
+            .moved-depositor-block{margin-top:10px;padding:10px;border:1px solid #eee;border-radius:6px;background:#fafafa}
           </style>
-      <div class="pay-guide-text">
-  * 무통장입금시 주문완료후 문자 or 카카오톡으로 결제정보 보내드립니다.<br>
-  <span class="pay-guide-red">* 카드결제의 경우 수수료 6.5프로 별도입니다.</span><br>
-  <span class="pay-guide-blue">* 법인카드 결제시 카카오톡으로 문의바랍니다.</span><br> 
-</div>
+          <div class="pay-guide-text">
+            * 무통장입금시 주문완료후 문자 or 카카오톡으로 결제정보 보내드립니다.<br>
+            <span class="pay-guide-red">* 카드결제의 경우 수수료 6.5프로 별도입니다.</span><br>
+            <span class="pay-guide-blue">* 법인카드 결제시 카카오톡으로 문의바랍니다.</span><br>
+          </div>
           <div class="pay-method-buttons">
             <button type="button" data-method="CREDIT" class="active">💳 카드결제</button>
             <button type="button" data-method="BANK">🏦 무통장입금</button>
           </div>
-          <div id="fnt-depositor-area"></div>
-        `;
-
-        paymentHeader.insertAdjacentElement("afterend", customUI);
-
-        if (depositorBlock) {
-          depositorBlock.classList.add("moved-depositor-block");
-          const area = customUI.querySelector("#fnt-depositor-area");
-          if (area) area.appendChild(depositorBlock);
+          <div id="fnt-depositor-area"></div>`;
+        paymentHeader.insertAdjacentElement('afterend', customUI);
+        const bankRadio = Array.from(document.querySelectorAll('input[type="radio"]'))
+          .find(r => String(r.value || '').includes('OPM01'));
+        const bankFieldset = bankRadio && bankRadio.closest('fieldset');
+        const depositorInput = document.querySelector('input[placeholder*="입금자명"],input[name="depositor"]');
+        const depositorBlock = document.querySelector('.css-1hw29i9') ||
+          (depositorInput && depositorInput.parentElement);
+        if (depositorBlock && !customUI.contains(depositorBlock)) {
+          depositorBlock.classList.add('moved-depositor-block');
+          customUI.querySelector('#fnt-depositor-area').appendChild(depositorBlock);
         }
-
-        const area = customUI.querySelector("#fnt-depositor-area");
-        const moved = area && depositorBlock;
-        if (fieldset && moved) fieldset.style.display = "none";
-
-        function applyMethodUI(method) {
-          const stateMethod =
-            method === "CREDIT" ? "CreditCard" : "BankTransfer";
-          localStorage.setItem("payMethod", stateMethod);
-
-          if (method === "CREDIT") {
-            if (depositorBlock) depositorBlock.style.display = "none";
-          } else {
-            if (depositorBlock) {
-              depositorBlock.style.display = "flex";
-              depositorBlock.style.flexDirection = "column";
-              depositorBlock.style.gap = "8px";
-            }
-          }
-        }
-
-        const buttons = customUI.querySelectorAll("button[data-method]");
+        if (bankFieldset) bankFieldset.style.setProperty('display','none','important');
         function setActive(method) {
-          buttons.forEach((b) => b.classList.remove("active"));
-          const btn = customUI.querySelector(`button[data-method="${method}"]`);
-          if (btn) btn.classList.add("active");
-          applyMethodUI(method);
-          saveCurrentState("Method Switch", method);
+          selectedMethod = method;
+          window.__fntPayMethod = method;
+          try { localStorage.setItem('payMethod', method === 'CREDIT' ? 'CreditCard' : 'BankTransfer'); }
+          catch(e) { console.warn(LOG_PREFIX + 'Storage unavailable:',e); }
+          customUI.querySelectorAll('button[data-method]').forEach(btn =>
+            btn.classList.toggle('active', btn.dataset.method === method));
+          syncBankVisibility();
+          saveCurrentState('Method Switch', method);
         }
-
-        buttons.forEach((btn) => {
-          btn.addEventListener("click", (e) => {
-            const method = e.currentTarget.getAttribute("data-method");
-            console.log(LOG_PREFIX + "Method clicked:", method);
-            setActive(method);
-          });
-        });
-
-        localStorage.setItem("payMethod", "BankTransfer");
-        setActive("BANK");
-
-        console.log(LOG_PREFIX + "Custom Payment UI injected");
-        clearInterval(timer);
-      }, 400);
+        customUI.querySelectorAll('button[data-method]').forEach(btn =>
+          btn.addEventListener('click', () => setActive(btn.dataset.method)));
+        setActive(selectedMethod);
+        console.log(LOG_PREFIX + 'Safari-ready payment UI injected');
+      } catch(e) { console.error(LOG_PREFIX + 'Payment UI injection error:', e); }
     }
+
+    syncBankVisibility();
+    injectCustomPaymentUI();
+    const uiRetry = setInterval(() => {
+      if (!pathMatches(CONFIG.PATHS.INFO)) { clearInterval(uiRetry); observer.disconnect(); return; }
+      syncBankVisibility();
+      injectCustomPaymentUI();
+    }, 400);
 
     function saveCurrentState(source = "Manual", overrideMethod = null) {
       // ✅ 모든 추출은 try-catch로 보호 (오류 나도 결제 진행)
@@ -601,12 +587,13 @@
       let method = overrideMethod;
       if (!method) {
         try {
-          const uiState = localStorage.getItem("payMethod");
+          const uiState = window.__fntPayMethod === "CREDIT" ? "CreditCard" :
+            window.__fntPayMethod === "BANK" ? "BankTransfer" : localStorage.getItem("payMethod");
           if (uiState === "CreditCard") method = "CREDIT";
           else if (uiState === "BankTransfer") method = "BANK";
-          else method = "BANK";
+          else method = "CREDIT";
         } catch (e) {
-          method = "BANK";
+          method = "CREDIT";
         }
       }
 
@@ -640,7 +627,7 @@
       return paymentData;
     }
 
-    window.addEventListener("load", function () {
+    function onPaymentPageReady() {
       // ✅ 주문자 정보 input 이벤트
       try {
         ["ordererName", "ordererCall", "ordererEmail"].forEach((name) => {
@@ -705,13 +692,10 @@
         },
         true
       );
-    });
-
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", injectCustomPaymentUI);
-    } else {
-      injectCustomPaymentUI();
     }
+    if (document.readyState === 'complete') onPaymentPageReady();
+    else window.addEventListener('load', onPaymentPageReady, {once:true});
+
   }
 
   // ---------------- /shop_payment_complete ----------------
@@ -719,7 +703,7 @@
   function handleShopPaymentComplete() {
     console.log(LOG_PREFIX + "Routing: /shop_payment_complete");
 
-    window.addEventListener("load", function () {
+    function onCompletePageReady() {
       const urlOrderNo = getURLParam("order_no");
 
       let stored = null;
@@ -772,7 +756,9 @@
       } else {
         console.log(LOG_PREFIX + "BANK intent or unknown -> no auto payment");
       }
-    });
+    }
+    if (document.readyState === 'complete') onCompletePageReady();
+    else window.addEventListener('load', onCompletePageReady, {once:true});
   }
 
   // ---------------- Router ----------------
@@ -786,9 +772,6 @@
     }
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initRouter);
-  } else {
-    initRouter();
-  }
+  if (document.documentElement) initRouter();
+  else document.addEventListener('DOMContentLoaded', initRouter, {once:true});
 })();
